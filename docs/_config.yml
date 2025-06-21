@@ -1,0 +1,5 @@
+theme: jekyll-theme-minimal
+title: Bank API Documentation
+description: Documentation for the Bank API project
+baseurl: "/lab-2025-i-cps-u1-03-csharp-LuzkalidGM"  # Ajusta esto según el nombre de tu repositorio
+exclude: [Bank/docs/docfx.json]  # Excluye archivos que no necesita Jekyll
