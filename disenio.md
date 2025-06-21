@@ -7,6 +7,4 @@ BankAccount : +Double Balance
 BankAccount : +Debit() Void
 BankAccount : +Credit() Void
 
-
-
 ```
