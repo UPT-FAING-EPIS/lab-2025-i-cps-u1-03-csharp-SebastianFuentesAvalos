@@ -1,0 +1,172 @@
+name: Build & Publish NuGet Package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test-analyze-pack:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Esto es importante para que SonarCloud tenga acceso a todo el historial
+
+      # Verificar estructura de directorios para diagnóstico
+      - name: Check directory structure
+        run: |
+          echo "Current directory:"
+          ls -la
+          echo "Bank directory:"
+          ls -la Bank/
+          echo "Looking for .sln files:"
+          find . -name "*.sln"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install tools
+        run: |
+          dotnet tool install --global coverlet.console
+          dotnet tool install --global dotnet-sonarscanner
+          dotnet tool list --global
+
+      # Verificar si la solución está en la raíz o en Bank
+      - name: Determine solution location
+        id: solution-location
+        run: |
+          if [ -f "*.sln" ]; then
+            echo "SOLUTION_DIR=." >> $GITHUB_ENV
+            echo "Solution found in root directory"
+          elif [ -f "Bank/*.sln" ]; then
+            echo "SOLUTION_DIR=Bank" >> $GITHUB_ENV
+            echo "Solution found in Bank directory"
+          else
+            echo "SOLUTION_DIR=Bank" >> $GITHUB_ENV
+            echo "No solution file found, defaulting to Bank directory"
+          fi
+
+      # Begin SonarCloud analysis - Importante: ejecutar desde el directorio donde está la solución
+      - name: Begin SonarCloud Analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          cd ${{ env.SOLUTION_DIR }}
+          
+          # Buscar el archivo .sln
+          SLN_FILE=$(find . -maxdepth 1 -name "*.sln" | head -1)
+          
+          if [ -n "$SLN_FILE" ]; then
+            echo "Using solution file: $SLN_FILE"
+            dotnet sonarscanner begin \
+              /k:"${{ secrets.SONAR_PROJECT_KEY }}" \
+              /o:"${{ secrets.SONAR_ORG }}" \
+              /d:sonar.token="${{ secrets.SONAR_TOKEN }}" \
+              /d:sonar.host.url="https://sonarcloud.io" \
+              /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml" \
+              /d:sonar.verbose=true
+          else
+            echo "No .sln file found, using directory-based analysis"
+            dotnet sonarscanner begin \
+              /k:"${{ secrets.SONAR_PROJECT_KEY }}" \
+              /o:"${{ secrets.SONAR_ORG }}" \
+              /d:sonar.token="${{ secrets.SONAR_TOKEN }}" \
+              /d:sonar.host.url="https://sonarcloud.io" \
+              /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml" \
+              /d:sonar.sources=. \
+              /d:sonar.verbose=true
+          fi
+
+      # Importante: mantener todas las operaciones de construcción en el mismo directorio
+      - name: Restore, Build and Test
+        run: |
+          cd ${{ env.SOLUTION_DIR }}
+          
+          # Restaurar y construir
+          dotnet restore
+          dotnet build --no-restore --configuration Release
+          
+          # Crear archivo coverlet.runsettings si no existe
+          if [ ! -f "coverlet.runsettings" ]; then
+            echo "<?xml version=\"1.0\" encoding=\"utf-8\" ?>
+            <RunSettings>
+              <DataCollectionRunSettings>
+                <DataCollectors>
+                  <DataCollector friendlyName=\"XPlat code coverage\">
+                    <Configuration>
+                      <Format>opencover</Format>
+                      <ExcludeByAttribute>Obsolete,GeneratedCodeAttribute,CompilerGeneratedAttribute</ExcludeByAttribute>
+                    </Configuration>
+                  </DataCollector>
+                </DataCollectors>
+              </DataCollectionRunSettings>
+            </RunSettings>" > coverlet.runsettings
+          fi
+          
+          # Ejecutar tests con cobertura
+          dotnet test --no-build --configuration Release --collect:"XPlat Code Coverage" --settings coverlet.runsettings
+          
+          # Mostrar archivos de cobertura generados
+          echo "Coverage files generated:"
+          find . -name "coverage.opencover.xml"
+
+      # End SonarCloud analysis - Debe estar en el mismo directorio que el begin
+      - name: End SonarCloud Analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          cd ${{ env.SOLUTION_DIR }}
+          dotnet sonarscanner end /d:sonar.token="${{ secrets.SONAR_TOKEN }}"
+
+      # Empaquetar en el directorio correcto
+      - name: Pack NuGet Package
+        run: |
+          mkdir -p nupkg
+          
+          cd ${{ env.SOLUTION_DIR }}
+          
+          # Verificar ubicación de proyectos
+          if [ -d "Bank.Domain" ]; then
+            echo "Packaging Bank.Domain project"
+            dotnet pack Bank.Domain/Bank.Domain.csproj --configuration Release --output ../nupkg
+          elif [ -d "Bank.WebApi" ]; then
+            echo "Packaging Bank.WebApi project"
+            dotnet pack Bank.WebApi/Bank.WebApi.csproj --configuration Release --output ../nupkg
+          else
+            echo "Looking for .csproj files to package"
+            # Buscar archivos .csproj que no sean de test
+            for PROJ in $(find . -name "*.csproj" | grep -v "Test"); do
+              echo "Packaging $PROJ"
+              dotnet pack $PROJ --configuration Release --output ../nupkg
+            done
+          fi
+          
+      # Configurar el origen NuGet de GitHub
+      - name: Setup GitHub NuGet Source
+        run: |
+          dotnet nuget add source \
+            --username ${{ github.actor }} \
+            --password ${{ secrets.GITHUB_TOKEN }} \
+            --store-password-in-clear-text \
+            --name github \
+            "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+      # La ruta de los paquetes está ahora en la raíz en el directorio nupkg
+      - name: Publish to GitHub NuGet
+        run: |
+          if [ -d "nupkg" ] && [ "$(find nupkg -name '*.nupkg' | wc -l)" -gt 0 ]; then
+            echo "Publishing NuGet packages:"
+            ls -la nupkg
+            dotnet nuget push nupkg/*.nupkg --source "github" --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
+          else
+            echo "No NuGet packages found to publish"
+          fi
+      - name: List NuGet Packages
+        run: ls -l nupkg

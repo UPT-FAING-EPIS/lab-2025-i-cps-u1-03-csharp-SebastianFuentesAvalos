@@ -1,0 +1,97 @@
+name: Release Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Diagnóstico paso a paso para encontrar el problema exacto
+      - name: Detailed Path Diagnostics
+        run: |
+          echo "===== CURRENT WORKING DIRECTORY ====="
+          pwd
+          
+          echo "===== LIST BANK DIRECTORY ====="
+          ls -la Bank/
+          
+          echo "===== CHECK IF BANK.SLN EXISTS ====="
+          if [ -f "Bank/Bank.sln" ]; then
+            echo "Bank.sln exists at Bank/Bank.sln"
+          else
+            echo "Bank.sln DOES NOT exist at Bank/Bank.sln"
+          fi
+          
+          echo "===== CHECK FILE PERMISSIONS ====="
+          ls -la Bank/Bank.sln || echo "No se puede listar Bank/Bank.sln"
+          
+          echo "===== FIND ALL .SLN FILES (CASE INSENSITIVE) ====="
+          find . -type f -iname "*.sln"
+
+      # Intento directo con la ruta completa sin cambiar directorios
+      - name: Restore with full path
+        run: |
+          # Intenta con la ruta completa sin cambiar directorio
+          if [ -f "Bank/Bank.sln" ]; then
+            echo "Restaurando con ruta completa"
+            dotnet restore "Bank/Bank.sln"
+          else
+            SOLUTION_FILE=$(find . -type f -iname "*.sln" | head -n 1)
+            if [ -n "$SOLUTION_FILE" ]; then
+              echo "Restaurando con archivo encontrado: $SOLUTION_FILE"
+              dotnet restore "$SOLUTION_FILE"
+            else
+              echo "No se encontró ningún archivo .sln"
+              exit 1
+            fi
+          fi
+
+      # Compilar usando la misma estrategia
+      - name: Build
+        if: success()
+        run: |
+          if [ -f "Bank/Bank.sln" ]; then
+            echo "Compilando con ruta completa"
+            dotnet build "Bank/Bank.sln" --configuration Release --no-restore
+          else
+            SOLUTION_FILE=$(find . -type f -iname "*.sln" | head -n 1)
+            if [ -n "$SOLUTION_FILE" ]; then
+              echo "Compilando con archivo encontrado: $SOLUTION_FILE"
+              dotnet build "$SOLUTION_FILE" --configuration Release --no-restore
+            fi
+          fi
+
+      # Empaquetar el proyecto WebApi
+      - name: Pack
+        if: success()
+        run: |
+          if [ -f "Bank/Bank.WebApi/Bank.WebApi.csproj" ]; then
+            echo "Empaquetando WebApi con ruta completa"
+            dotnet pack "Bank/Bank.WebApi/Bank.WebApi.csproj" --configuration Release --no-build --output nupkg
+          else
+            PROJECT_FILE=$(find . -type f -path "*/Bank.WebApi/*.csproj" | head -n 1)
+            if [ -n "$PROJECT_FILE" ]; then
+              echo "Empaquetando con archivo encontrado: $PROJECT_FILE"
+              dotnet pack "$PROJECT_FILE" --configuration Release --no-build --output nupkg
+            fi
+          fi
+
+      # Publicar el paquete
+      - name: Create GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nupkg/*.nupkg
